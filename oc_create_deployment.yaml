@@ -1,0 +1,120 @@
+- name: ENEA Deployment
+  hosts: localhost
+  tasks:
+############################################################################################
+  - name: Login to OpenShift
+    register: oc_login
+    shell: |
+      oc login -u {{ OC_USERNAME }} -p {{ OC_PASSSWORD }} -n {{ NAMESPACE }} {{ OC_HOST }}  
+############################################################################################    
+  - name: Load Node Image
+    register: load_node  
+    shell: |
+      $(which docker) load -i ../images/enea-{{ PRODUCT }}-node.tar | grep -v latest | awk '{print $3}'
+  - name: Load Node Image Debug
+    debug:
+      msg: 
+        - "Image: {{ load_node.stdout }}"   
+        
+  - name: Tag Node Image
+    register: tag_node  
+    shell: |
+      $(which docker) tag enea-{{ PRODUCT }}-node {{ REGISTRY }}/{{ load_node.stdout }}  
+
+  - name: Push Node Image
+    register: push_node  
+    shell: |
+      $(which docker) push {{ REGISTRY }}/{{ load_node.stdout }}  
+############################################################################################
+  - name: Load DB Image
+    register: load_db  
+    shell: |
+      $(which docker) load -i ../images/enea-{{ PRODUCT }}-db.tar | grep -v latest | awk '{print $3}'
+  - name: Load DB Image Debug
+    debug:
+      msg: 
+        - "Image: {{ load_db.stdout }}"   
+        
+  - name: Tag DB Image
+    register: tag_db  
+    shell: |
+      $(which docker) tag enea-{{ PRODUCT }}-db {{ REGISTRY }}/{{ load_db.stdout }}  
+
+  - name: Push DB image
+    register: push_db
+    shell: |
+      $(which docker) push {{ REGISTRY }}/{{ load_db.stdout }}  
+############################################################################################
+  - name: Replace License in configuration.yaml
+    ansible.builtin.replace:
+      path: "../configuration.yaml"
+      regexp: 'License:.*'
+      replace: 'License: {{ LICENSE }}'
+    when: LICENSE is defined   
+    
+  - name: Replace Node Image in configuration.yaml
+    ansible.builtin.replace:
+      path: "../configuration.yaml"
+      regexp: 'NodeImage:.*'
+      replace: 'NodeImage: {{ REGISTRY }}/{{ load_node.stdout }}'
+
+  - name: Replace DB Image in configuration.yaml
+    ansible.builtin.replace:
+      path: "../configuration.yaml"
+      regexp: 'DBImage:.*'
+      replace: 'DBImage: {{ REGISTRY }}/{{ load_db.stdout }}'
+############################################################################################
+  - name: Execute generate.bash
+    register: generate_bash  
+    shell: "../generate.bash -y"
+############################################################################################    
+  - name: Set privileged mode for pods
+    register: give_privileged  
+    shell: |
+      sed -i -e 's/privileged\s*:\s*false/privileged : true/g' ../deployment/*
+  - name: Change deployment namespace
+    register: set_namespace  
+    shell: |
+      sed -i -e 's/namespace\s*:\s*{{ PRODUCT }}/namespace : {{ NAMESPACE }}/g' ../deployment/* 
+############################################################################################
+  - name: Deploy 
+    register: deployment  
+    shell: "$(which oc) apply -f ../deployment/"    
+############################################################################################    
+  - name: Wait untill all pods are "Running"
+    register: check_running_status
+    until: check_running_status.stdout == "0"
+    retries: 100
+    delay: 60
+    changed_when: False
+    shell: "$(which oc) get pods -o wide -n {{ NAMESPACE }} | grep -e \"{{ PRODUCT }}\\|a-db\" | awk {'print $3'} | grep -v 'Running' | wc -l"
+
+  - name: Wait until all pods are Ready
+    register: check_ready_status
+    until: check_ready_status.stdout == "0"
+    retries: 100
+    delay: 60
+    changed_when: False
+    shell: "$(which oc) get pods -o wide -n {{ NAMESPACE }} | grep -e \"{{ PRODUCT }}\\|a-db\" | awk {'print $2'} | grep -v '1/1' | wc -l"
+
+  - name: Pause for 2 minutes to just in case new pods appear
+    pause:
+      minutes: 2
+    
+  - name: Wait again until all pods are Ready
+    register: check_ready_status2
+    until: check_ready_status2.stdout == "0"
+    retries: 100
+    delay: 60
+    changed_when: False
+    shell: "$(which oc) get pods -o wide -n {{ NAMESPACE }} | grep -e \"{{ PRODUCT }}\\|a-db\" | awk {'print $2'} | grep -v '1/1' | wc -l"
+    
+  - name: Wait for DEPLOYMENT STATUS DONE on oam-0
+    register: check_deployment_done
+    until: check_deployment_done.stdout == "1"
+    retries: 100
+    delay: 60
+    changed_when: False
+    shell: "$(which oc) exec -it -n {{ NAMESPACE }} {{ PRODUCT }}-oam-0 -- tail -n 10 /opt/netzwert/log/platform_run_{{ PRODUCT }}-oam-0.log | grep 'DEPLOYMENT STATUS: Done.' | wc -l"    
+############################################################################################    
+
